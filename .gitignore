@@ -1,0 +1,38 @@
+# --- Build artifacts ---
+build/
+*.obj
+*.o
+*.exe
+*.out
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.dll
+*.so
+*.a
+
+# --- IDE / Editor ---
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+CMakeSettings.json
+
+# --- CMake ---
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CTestTestfile.cmake
+*.cmake
+!CMakeLists.txt
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

@@ -1,0 +1,132 @@
+// Physics compute shader
+// Each thread handles one particle: density calc → force calc → integrate
+#version 430 core
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Input buffers (read: binding 0-3)
+layout(std430, binding = 0) readonly buffer InPos  { vec2 data[]; } in_pos;
+layout(std430, binding = 1) readonly buffer InVel  { vec2 data[]; } in_vel;
+layout(std430, binding = 2) readonly buffer Types  { uint data[]; } types;
+layout(std430, binding = 3) readonly buffer Forces { float data[]; } forces;
+
+// Output buffers (write: binding 4-5)
+layout(std430, binding = 4) buffer OutPos { vec2 data[]; } out_pos;
+layout(std430, binding = 5) buffer OutVel { vec2 data[]; } out_vel;
+
+// Uniform parameters
+uniform vec2  u_region_size;
+uniform uint  u_particle_count;
+uniform uint  u_particle_types;
+uniform float u_dt;
+uniform float u_dampening;
+uniform float u_repulsion_radius;
+uniform float u_interaction_radius;
+uniform float u_density_limit;
+
+// Pseudo-random jitter for overlapping particles
+float hash(float v) {
+    return fract(sin(dot(vec2(v, v / 10.0f), vec2(12.9898f, 78.233f))) * 43758.5453f);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= u_particle_count) return;
+
+    vec2 pos_a = in_pos.data[i];
+    vec2 vel_a = in_vel.data[i];
+    uint type_a = types.data[i];
+    vec2 total_force = vec2(0.0f);
+    float local_density = 0.0f;
+    int n = int(u_particle_count);
+
+    float max_radius_sq = u_interaction_radius * u_interaction_radius;
+    float region_w = u_region_size.x;
+    float region_h = u_region_size.y;
+
+    // --- Pass 1: compute local density ---
+    for (int j = 0; j < n; j++) {
+        if (i == uint(j)) continue;
+
+        vec2 pos_b = in_pos.data[j];
+        vec2 delta = pos_a - pos_b;
+
+        // Toroidal wrap
+        delta.x -= round(delta.x / region_w) * region_w;
+        delta.y -= round(delta.y / region_h) * region_h;
+
+        float dist_sq = dot(delta, delta);
+        if (dist_sq > max_radius_sq || dist_sq == 0.0f) continue;
+
+        float dist = sqrt(dist_sq);
+        float ndist = 1.0f - dist / u_interaction_radius;
+
+        if (type_a == types.data[j])
+            local_density += ndist;
+        else
+            local_density += ndist * 0.5f;
+    }
+
+    // --- Pass 2: compute forces ---
+    for (int j = 0; j < n; j++) {
+        if (i == uint(j)) continue;
+
+        vec2 pos_b = in_pos.data[j];
+        vec2 delta = pos_a - pos_b;
+
+        // Toroidal wrap
+        delta.x -= round(delta.x / region_w) * region_w;
+        delta.y -= round(delta.y / region_h) * region_h;
+
+        float dist_sq = dot(delta, delta);
+        if (dist_sq > max_radius_sq) continue;
+
+        float dist = sqrt(dist_sq);
+        float force;
+
+        if (dist > 0.0f) {
+            uint type_b = types.data[j];
+            float attraction = forces.data[type_a + type_b * u_particle_types];
+            vec2 dir = delta / dist;
+
+            // Density limit applies only to positive (attractive) forces
+            if (attraction > 0.0f) {
+                float df = 1.0f - min(max(0.0f, local_density - u_density_limit), 1.005f);
+                attraction *= df;
+            }
+
+            if (dist < u_repulsion_radius)
+                force = (dist / u_repulsion_radius - 1.0f) * 2.0f;
+            else {
+                float width = u_interaction_radius - u_repulsion_radius;
+                float midpoint = (u_repulsion_radius + u_interaction_radius) * 0.5f;
+                force = attraction * (1.0f - abs(dist - midpoint) / (width * 0.5f));
+            }
+
+            total_force += dir * force * -50.0f;
+        } else {
+            // Jitter when overlapping
+            float r1 = hash(float(i) + pos_a.x) - 0.5f;
+            float r2 = hash(float(i) + pos_a.y) - 0.5f;
+            total_force += vec2(r1, r2);
+        }
+    }
+
+    // Clamp max force
+    float f_len_sq = dot(total_force, total_force);
+    const float MAX_FORCE = 100.0f;
+    if (f_len_sq > MAX_FORCE * MAX_FORCE)
+        total_force = normalize(total_force) * MAX_FORCE;
+
+    // Integrate
+    vel_a += total_force * u_dt;
+    vel_a *= u_dampening;
+    pos_a += vel_a * u_dt;
+
+    // Toroidal wrap (each axis wraps independently)
+    pos_a = mod(pos_a + vec2(region_w, region_h), vec2(region_w, region_h));
+
+    // Write output
+    out_pos.data[i] = pos_a;
+    out_vel.data[i] = vel_a;
+}
